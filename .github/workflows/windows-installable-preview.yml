@@ -1,0 +1,76 @@
+name: Open Download Manager Windows installable preview
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-installable-preview.yml
+      - src-tauri/**
+      - renderer/**
+      - extension/**
+      - scripts/**
+      - Cargo.toml
+      - Cargo.lock
+      - package.json
+      - bun.lock
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: open-download-manager-windows-preview
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Run Rust and browser-extension tests
+        run: bun run test
+      - name: Build Windows installer
+        run: bun run build
+      - name: Prepare installer and SHA-256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'src-tauri/target/release/bundle/nsis'
+          if (-not (Test-Path $source)) { throw "NSIS output directory not found: $source" }
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $packages = Get-ChildItem $source -File -Filter '*.exe'
+          if (-not $packages) { throw 'No installable NSIS .exe was produced.' }
+          $packages | Copy-Item -Destination release-assets
+          $checksums = foreach ($file in Get-ChildItem release-assets -File) {
+            $hash = Get-FileHash $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLower())  $($file.Name)"
+          }
+          $checksums | Set-Content release-assets/SHA256SUMS.txt
+      - name: Read app version
+        id: meta
+        shell: pwsh
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          "version=$($config.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=preview-v$($config.version)-build-$($env:GITHUB_RUN_NUMBER)-$($env:GITHUB_RUN_ATTEMPT)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Publish Windows installable preview
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Open Download Manager v${{ steps.meta.outputs.version }} — Windows preview
+          prerelease: true
+          make_latest: false
+          generate_release_notes: true
+          body: |
+            Windows x64 NSIS installer built from the repository's main branch. This is a prerelease build and is not code-signed.
+          files: |
+            release-assets/*
+          fail_on_unmatched_files: true
